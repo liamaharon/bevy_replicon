@@ -51,7 +51,7 @@ impl FilterRegistry {
         world: &mut World,
         registry: &mut ReplicationRegistry,
     ) -> FilterBit {
-        if self.scopes.len() >= u8::BITS as usize {
+        if self.scopes.len() >= u32::BITS as usize {
             panic!("number of visibility scopes can't exceed {}", u32::BITS);
         }
 
