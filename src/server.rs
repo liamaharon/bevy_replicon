@@ -37,7 +37,7 @@ use crate::{
         backend::channels::ClientChannel,
         message::server_message::message_buffer::MessageBuffer,
         replication::{
-            client_ticks::{ClientTicks, EntityTicks},
+            client_ticks::{ClientTicks, DiffCursors, EntityTicks},
             registry::{
                 ComponentIndex, ReplicationRegistry, component_mask::ComponentMask,
                 ctx::SerializeCtx,
@@ -726,12 +726,11 @@ fn collect_changes(
                                 )?
                             } else {
                                 ctx.diff_cursor = diff_cursor;
-                                let range = serialized.write_component(&mut ctx, &mut component)?;
-                                if let Some(cursor) = ctx.diff_cursor.take() {
-                                    mutations.add_diff_cursor(component_index, cursor);
-                                }
-                                range
+                                serialized.write_component(&mut ctx, &mut component)?
                             };
+                            if let Some(cursor) = ctx.diff_cursor.take() {
+                                mutations.add_diff_cursor(component_index, cursor);
+                            }
                             mutations.add_component(component_range);
                         }
                     } else {
@@ -752,6 +751,9 @@ fn collect_changes(
                             &mut component,
                         )?;
                         updates.add_inserted_component(component_range, component_index);
+                        if let Some(cursor) = ctx.diff_cursor.take() {
+                            updates.add_diff_cursor(component_index, cursor);
+                        }
                     }
                 }
             }
@@ -782,6 +784,7 @@ fn collect_changes(
                         **change_tick,
                         **server_tick,
                         updates.take_changed_components(),
+                        updates.take_diff_cursors(),
                     );
                 }
 
@@ -807,17 +810,24 @@ fn update_ticks(
     system_tick: Tick,
     server_tick: RepliconTick,
     components: ComponentMask,
+    diff_cursors: DiffCursors,
 ) {
-    match entity_ticks {
+    let ticks = match entity_ticks {
         Entry::Occupied(entry) => {
-            let entity_ticks = entry.into_mut();
-            entity_ticks.system_tick = system_tick;
-            entity_ticks.server_tick = server_tick;
-            entity_ticks.components |= &components;
+            let ticks = entry.into_mut();
+            ticks.system_tick = system_tick;
+            ticks.server_tick = server_tick;
+            ticks.components |= &components;
+            ticks
         }
         Entry::Vacant(entry) => {
-            entry.insert(EntityTicks::new(server_tick, system_tick, components));
+            entry.insert(EntityTicks::new(server_tick, system_tick, components))
         }
+    };
+    // Updates use the reliable ordered channel, just like their component ticks.
+    // Mutations retain their cursors until their packet is acknowledged.
+    for (component, cursor) in diff_cursors {
+        ticks.set_diff_cursor(component, cursor);
     }
 }
 

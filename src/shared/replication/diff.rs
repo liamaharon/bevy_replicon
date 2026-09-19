@@ -273,7 +273,7 @@ impl<C: Diffable> DiffHistory<C> {
         };
 
         let missing_count = current.distance_after(cursor) as usize;
-        if self.diffs.len() <= missing_count {
+        if self.diffs.len() < missing_count {
             return (current, DiffIter::empty(&self.diffs));
         }
 
