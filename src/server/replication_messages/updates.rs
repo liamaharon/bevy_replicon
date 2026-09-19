@@ -10,6 +10,7 @@ use crate::{
     shared::{
         backend::channels::ServerChannel,
         replication::{
+            client_ticks::DiffCursors,
             registry::{ComponentIndex, component_mask::ComponentMask},
             update_message_flags::UpdateMessageFlags,
         },
@@ -69,6 +70,9 @@ pub(crate) struct Updates {
 
     /// Components written in [`Self::changes`].
     changed_components: ComponentMask,
+
+    /// Cursors carried by the current entity's reliable update.
+    diff_cursors: DiffCursors,
 
     /// Indicates that an entity has been written since the
     /// last call of [`Self::start_entity_changes`].
@@ -166,6 +170,7 @@ impl Updates {
         &mut self,
         component: Range<usize>,
         index: ComponentIndex,
+        cursor: Option<DiffIndex>,
     ) {
         debug_assert!(self.changed_entity_added);
         let changes = self
@@ -175,12 +180,17 @@ impl Updates {
 
         changes.add_data(component);
         self.changed_components.insert(index);
+        if let Some(cursor) = cursor {
+            self.diff_cursors.push((index, cursor));
+        }
     }
 
     /// Takes last mutated entity with its component chunks from the mutate message.
     pub(crate) fn take_added_entity(&mut self, mutations: &mut Mutations) {
         debug_assert!(mutations.entity_added());
         let entity_mutations = mutations.pop().expect("entity should be written");
+        self.diff_cursors.extend(entity_mutations.diff_cursors);
+        self.changed_components |= &entity_mutations.components;
 
         if !self.changed_entity_added {
             self.changes.push(entity_mutations.ranges);
@@ -188,8 +198,11 @@ impl Updates {
             let changes = self.changes.last_mut().expect("entity should be written");
             debug_assert_eq!(entity_mutations.ranges.entity, changes.entity);
             changes.extend(&entity_mutations.ranges);
-            self.changed_components |= &entity_mutations.components;
         }
+    }
+
+    pub(crate) fn take_diff_cursors(&mut self) -> DiffCursors {
+        mem::take(&mut self.diff_cursors)
     }
 
     /// Takes all changed components for the last changed entity that was written.

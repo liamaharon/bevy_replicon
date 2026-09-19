@@ -233,3 +233,84 @@ impl Diffable for Points {
         Ok(())
     }
 }
+
+#[derive(Component, Serialize, Deserialize)]
+struct Extra;
+
+#[test]
+fn snapshots_bootstrap_diff_cursors_for_every_recipient_and_atomic_updates() {
+    let mut server = App::new();
+    let mut first = App::new();
+    let mut second = App::new();
+    for app in [&mut server, &mut first, &mut second] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate_diff::<Points>()
+        .replicate::<Extra>()
+        .finish();
+    }
+    server.connect_client(&mut first);
+    server.connect_client(&mut second);
+    let entity = server
+        .world_mut()
+        .spawn((Replicated, Points(vec![12345; 256])))
+        .id();
+    server.update();
+    for client in [&mut first, &mut second] {
+        server.exchange_with_client(client);
+        client.update();
+        server.exchange_with_client(client);
+    }
+    // Exactly the retained history length must still be diffable from the
+    // initial reliable snapshot, including recipients reusing cached bytes.
+    for index in 0..Points::HISTORY_LEN {
+        server
+            .world_mut()
+            .entity_mut(entity)
+            .apply_diff::<Points>(AddPoint(index))
+            .unwrap();
+    }
+    for step in 0..3 {
+        if step > 0 {
+            server
+                .world_mut()
+                .entity_mut(entity)
+                .apply_diff::<Points>(AddPoint(10 + step))
+                .unwrap();
+        }
+        if step == 1 {
+            // An insertion moves this entity's mutation onto the reliable
+            // channel. The next diff must use that newly established base.
+            server.world_mut().entity_mut(entity).insert(Extra);
+        }
+        server.update();
+        let mut packets = 0;
+        server
+            .world_mut()
+            .resource_mut::<ServerMessages>()
+            .retain_sent(|(_, _, bytes)| {
+                packets += 1;
+                assert!(
+                    bytes.len() < 128,
+                    "full 256-element snapshot sent instead of diff: {} bytes",
+                    bytes.len()
+                );
+                true
+            });
+        assert!(packets >= 2);
+        for client in [&mut first, &mut second] {
+            server.exchange_with_client(client);
+            client.update();
+            server.exchange_with_client(client);
+            let actual = client
+                .world_mut()
+                .query::<&Points>()
+                .single(client.world())
+                .unwrap();
+            assert_eq!(actual.0, server.world().get::<Points>(entity).unwrap().0);
+        }
+    }
+}
