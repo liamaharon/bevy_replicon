@@ -273,7 +273,7 @@ impl<C: Diffable> DiffHistory<C> {
         };
 
         let missing_count = current.distance_after(cursor) as usize;
-        if self.diffs.len() <= missing_count {
+        if self.diffs.len() < missing_count {
             return (current, DiffIter::empty(&self.diffs));
         }
 
@@ -496,12 +496,19 @@ mod tests {
         assert_eq!(index.get(), 3);
         assert_eq!(diffs.len(), 0);
 
-        let (index, diffs) = history.diffs_after(Some(DiffIndex::new(0)), Tick::new(4));
+        let (index, diffs) = history.diffs_after(Some(DiffIndex::new(0) - 1), Tick::new(4));
         assert_eq!(index.get(), 3);
         assert_eq!(
             diffs.len(),
             0,
             "shouldn't return diffs for indices outside of the history"
+        );
+
+        let (index, diffs) = history.diffs_after(Some(DiffIndex::new(0)), Tick::new(4));
+        assert_eq!(index.get(), 3);
+        assert_eq!(
+            diffs.0.copied().collect::<Vec<_>>(),
+            [ValueDiff::Add(1), ValueDiff::Add(2), ValueDiff::Add(3)]
         );
 
         let (index, diffs) = history.diffs_after(Some(DiffIndex::new(1)), Tick::new(4));
