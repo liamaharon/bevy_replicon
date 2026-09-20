@@ -4,7 +4,7 @@ use core::iter;
 
 use alloc::collections::vec_deque::{self, VecDeque};
 use bevy::{
-    ecs::{change_detection::Tick, component::Mutable},
+    ecs::{change_detection::Tick, component::Mutable, entity::EntityMapper},
     platform::collections::HashMap,
     prelude::*,
 };
@@ -100,6 +100,14 @@ struct Point {
 pub trait Diffable: Component<Mutability = Mutable> + Serialize + DeserializeOwned + Sized {
     /// A recordable change that transforms this component.
     type Diff: Serialize + DeserializeOwned + Send + Sync + 'static;
+
+    /// Maps entity references in a received diff before applying it.
+    ///
+    /// Override this when the diff contains entity references, typically by
+    /// deriving [`bevy::ecs::entity::MapEntities`] on the diff and forwarding to it. Snapshot
+    /// references are mapped separately by [`Component::map_entities`].
+    /// Diffs are mapped only once, after deduplication and ordering.
+    fn map_diff_entities(_diff: &mut Self::Diff, _mapper: &mut impl EntityMapper) {}
 
     /// Maximum number of diffs retained for diff serialization.
     ///

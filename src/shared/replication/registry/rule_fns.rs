@@ -339,7 +339,12 @@ pub fn deserialize_diff_in_place<C: Diffable>(
         ComponentDelta::<C>::Diffs { index, diffs } => {
             let buffer = ctx.get_or_default::<DiffBuffer<C>>();
             buffer.push(index, diffs);
-            for diff in buffer.drain_ready() {
+            loop {
+                let Some(mut diff) = ctx.get_or_default::<DiffBuffer<C>>().drain_ready().next()
+                else {
+                    break;
+                };
+                C::map_diff_entities(&mut diff, ctx);
                 component.apply_diff(&diff)?;
             }
         }
