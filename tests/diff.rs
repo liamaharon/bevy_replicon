@@ -530,3 +530,121 @@ impl Diffable for Points {
         Ok(())
     }
 }
+
+#[test]
+fn entity_references_are_mapped_in_snapshots_and_ordered_diffs() {
+    use bevy::ecs::entity::{EntityMapper, MapEntities};
+    use bevy_replicon::shared::server_entity_map::ServerEntityMap;
+
+    #[derive(Component, Serialize, Deserialize)]
+    struct Links(#[entities] Vec<Entity>);
+
+    #[derive(Serialize, Deserialize, MapEntities)]
+    enum LinkDiff {
+        Append(#[entities] Entity),
+        Remove(#[entities] Entity),
+    }
+
+    impl Diffable for Links {
+        type Diff = LinkDiff;
+
+        fn map_diff_entities(diff: &mut Self::Diff, mapper: &mut impl EntityMapper) {
+            diff.map_entities(mapper);
+        }
+
+        fn apply_diff(&mut self, diff: &Self::Diff) -> Result<()> {
+            match diff {
+                LinkDiff::Append(entity) => self.0.push(*entity),
+                LinkDiff::Remove(entity) => self.0.retain(|link| link != entity),
+            }
+            Ok(())
+        }
+    }
+
+    let mut server = App::new();
+    let mut client = App::new();
+    for app in [&mut server, &mut client] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate_diff::<Links>()
+        .finish();
+    }
+    for _ in 0..12 {
+        client.world_mut().spawn_empty();
+    }
+    let first = server.world_mut().spawn(Replicated).id();
+    let second = server.world_mut().spawn(Replicated).id();
+    let list = server
+        .world_mut()
+        .spawn((Replicated, Links(vec![first])))
+        .id();
+    server.connect_client(&mut client);
+    server.update();
+    server.exchange_with_client(&mut client);
+    client.update();
+    server.exchange_with_client(&mut client);
+    server.update();
+    let map = client.world().resource::<ServerEntityMap>();
+    let mapped_first = *map.to_client().get(&first).unwrap();
+    let mapped_second = *map.to_client().get(&second).unwrap();
+    let mapped_list = *map.to_client().get(&list).unwrap();
+    assert_ne!(mapped_first, first);
+    assert_ne!(mapped_second, second);
+    assert_eq!(
+        client.world().get::<Links>(mapped_list).unwrap().0,
+        [mapped_first]
+    );
+
+    // Deliver duplicate packets in reverse order. Mapping must affect only new
+    // diffs, never previously mapped component references or discarded diffs.
+    let mut packets = Vec::new();
+    for diff in [
+        LinkDiff::Append(second),
+        LinkDiff::Append(first),
+        LinkDiff::Remove(second),
+    ] {
+        server
+            .world_mut()
+            .entity_mut(list)
+            .apply_diff::<Links>(diff)
+            .unwrap();
+        server.update();
+        packets.extend(
+            server
+                .world_mut()
+                .resource_mut::<ServerMessages>()
+                .drain_sent(),
+        );
+    }
+    for (_, channel, bytes) in packets.into_iter().rev() {
+        let mut messages = client.world_mut().resource_mut::<ClientMessages>();
+        messages.insert_received(channel, bytes.clone());
+        messages.insert_received(channel, bytes);
+    }
+    client.update();
+    assert_eq!(
+        client.world().get::<Links>(mapped_list).unwrap().0,
+        [mapped_first, mapped_first]
+    );
+    assert_eq!(
+        client
+            .world()
+            .resource::<ServerEntityMap>()
+            .to_client()
+            .len(),
+        3
+    );
+
+    // A direct mutation forces another snapshot without remapping old values twice.
+    server.world_mut().get_mut::<Links>(list).unwrap().0 = vec![second];
+    server.update();
+    server.exchange_with_client(&mut client);
+    client.update();
+    assert_eq!(
+        client.world().get::<Links>(mapped_list).unwrap().0,
+        [mapped_second]
+    );
+}
